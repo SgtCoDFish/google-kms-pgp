@@ -139,6 +139,10 @@ func runExport(options options) error {
 		return errors.New("email is required")
 	}
 
+	cfg := packet.Config{
+		DefaultHash: crypto.SHA512,
+	}
+
 	entity, err := getEntity(options.key)
 	if err != nil {
 		return err

@@ -1,4 +1,5 @@
 // Copyright © 2018 Heptio
+
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -17,8 +18,6 @@ package kmssigner
 import (
 	"crypto"
 	"crypto/rsa"
-	"crypto/sha256"
-	"crypto/sha512"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/pem"
@@ -31,48 +30,14 @@ import (
 	cloudkms "google.golang.org/api/cloudkms/v1"
 )
 
-// pgpDigestAlgo represents different supported SHA hash algorithms
-type pgpDigestAlgo int
-
-const (
-	sha256Algo = pgpDigestAlgo(sha256.Size)
-	sha512Algo = pgpDigestAlgo(sha512.Size)
-)
-
-// ChecksumSize is the size, in bytes, that a checksum using the given digest algorithm should be
-func (p pgpDigestAlgo) ChecksumSize() int {
-	return int(p)
-}
-
-// KMSDigest returns a Digest corresponding to the given digest algorithm, or an error
-// if the digest is the incorrect size
-func (p pgpDigestAlgo) KMSDigest(digest []byte) (*cloudkms.Digest, error) {
-	if len(digest) != p.ChecksumSize() {
-		return nil, fmt.Errorf("expected digest to have length %d but got %d", p.ChecksumSize(), len(digest))
-	}
-
-	encodedDigest := base64.StdEncoding.EncodeToString(digest)
-
-	kmsDigest := new(cloudkms.Digest)
-	switch p {
-	case sha256Algo:
-		kmsDigest.Sha256 = encodedDigest
-
-	case sha512Algo:
-		kmsDigest.Sha512 = encodedDigest
-
-	default:
-		panic("unknown digest type")
-	}
-
-	return kmsDigest, nil
-}
-
 // Signer extends crypto.Signer to provide more key metadata.
 type Signer interface {
 	crypto.Signer
+
 	RSAPublicKey() *rsa.PublicKey
 	CreationTime() time.Time
+
+	HashAlgo() crypto.Hash
 }
 
 // New returns a crypto.Signer backed by the named Google Cloud KMS key.
@@ -82,17 +47,17 @@ func New(api *cloudkms.Service, name string) (Signer, error) {
 		return nil, errors.WithMessage(err, "could not get key version from Google Cloud KMS API")
 	}
 
-	var algo pgpDigestAlgo
+	var hashAlgo crypto.Hash
 
 	switch metadata.Algorithm {
 	case "RSA_SIGN_PKCS1_2048_SHA256":
-		algo = sha256Algo
+		hashAlgo = crypto.SHA256
 	case "RSA_SIGN_PKCS1_3072_SHA256":
-		algo = sha256Algo
+		hashAlgo = crypto.SHA256
 	case "RSA_SIGN_PKCS1_4096_SHA256":
-		algo = sha256Algo
+		hashAlgo = crypto.SHA256
 	case "RSA_SIGN_PKCS1_4096_SHA512":
-		algo = sha512Algo
+		hashAlgo = crypto.SHA512
 
 	default:
 		return nil, fmt.Errorf("unsupported key algorithm %q", metadata.Algorithm)
@@ -129,7 +94,7 @@ func New(api *cloudkms.Service, name string) (Signer, error) {
 		pubkey:       *pubkeyRSA,
 		creationTime: creationTime,
 
-		pgpDigestAlgo: algo,
+		pgpDigestAlgo: hashAlgo,
 	}, nil
 }
 
@@ -139,7 +104,7 @@ type kmsSigner struct {
 	pubkey       rsa.PublicKey
 	creationTime time.Time
 
-	pgpDigestAlgo pgpDigestAlgo
+	pgpDigestAlgo crypto.Hash
 }
 
 func (k *kmsSigner) Public() crypto.PublicKey {
@@ -154,8 +119,36 @@ func (k *kmsSigner) CreationTime() time.Time {
 	return k.creationTime
 }
 
+func (k *kmsSigner) HashAlgo() crypto.Hash {
+	return k.pgpDigestAlgo
+}
+
+// KMSDigest returns a Digest corresponding to the given digest algorithm, or an error
+// if the digest is the incorrect size
+func (k *kmsSigner) KMSDigest(digest []byte) (*cloudkms.Digest, error) {
+	if len(digest) != k.pgpDigestAlgo.Size() {
+		return nil, fmt.Errorf("expected digest to have length %d but got %d", k.pgpDigestAlgo.Size(), len(digest))
+	}
+
+	encodedDigest := base64.StdEncoding.EncodeToString(digest)
+
+	kmsDigest := new(cloudkms.Digest)
+	switch k.pgpDigestAlgo {
+	case crypto.SHA256:
+		kmsDigest.Sha256 = encodedDigest
+
+	case crypto.SHA512:
+		kmsDigest.Sha512 = encodedDigest
+
+	default:
+		panic("unknown digest type")
+	}
+
+	return kmsDigest, nil
+}
+
 func (k *kmsSigner) Sign(rand io.Reader, digest []byte, opts crypto.SignerOpts) ([]byte, error) {
-	kmsDigest, err := k.pgpDigestAlgo.KMSDigest(digest)
+	kmsDigest, err := k.KMSDigest(digest)
 	if err != nil {
 		return nil, fmt.Errorf("input digest must be valid size for given key type: %w", err)
 	}
